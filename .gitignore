@@ -1,1 +1,2 @@
 src/linux/build/*.deb
+src/windows/build/target
