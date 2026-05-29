@@ -165,6 +165,7 @@ namespace PayloadInstaller
             {
                 Console.WriteLine("\nUninstalling legacy product: " + pkg + "...");
                 RunCommand("qpm-cli", "--uninstall " + pkg + " --silent");
+                RunCommand("qsc-cli", "tool uninstall -n " + pkg);
             }
 
             int result = 0;

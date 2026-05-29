@@ -61,10 +61,6 @@ DWORD execute_command(const std::wstring &command)
 
 DWORD install_drivers(const std::wstring &path)
 {
-    // Clean old drivers (best effort — ignore errors from qdclr)
-    printf("\nRemoving old drivers ...\n");
-    execute_command(COMMAND_QDCLR);
-
     // Install all *.inf under inf_root (pnputil recurses via /subdirs)
     std::wstring cmd = COMMAND_PNPUTIL_MAIN;
     cmd += path;
