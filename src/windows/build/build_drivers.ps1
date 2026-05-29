@@ -8,10 +8,11 @@ param(
 # Configuration
 # ==============================================================================
 
-# Source directory: one level up (src/windows/) contains INFs
+# Source directory: one level up (src/windows/)
 $Script:SourceRoot = ".."
 $Script:OutputRoot = "target"
 $Script:DriversDir = "drivers"
+$Script:ToolsDir   = "tools"
 
 # Version header: one level up alongside the INFs
 $Script:VersionHeaderFile = "..\qcversion.h"
@@ -25,6 +26,11 @@ $Script:InfVersionMap = @{
     "qcwwanlib.inf"= "QCOM_USB_DRIVERS_PRODUCT_VERSION"
     "qdblib.inf"   = "QCOM_USB_DRIVERS_PRODUCT_VERSION"
 }
+
+# Binary assets to copy (pre-compiled files, etc.), as-is to OutputRoot.
+$Script:BinaryAssets = @(
+    @{ Source = "filter";  Destination = $Script:DriversDir }
+)
 
 # Build platforms used to compute the inf2cat OS target list.
 $Script:BuildPlatforms = @(
@@ -135,30 +141,55 @@ function Find-WDKTool {
 # Functions - Output Collection
 # ==============================================================================
 
-# Copies INF files to OutputRoot.
+# Copies INF files to the drivers output directory.
 function Copy-DriverOutputs {
     Write-Host "========================================"
     Write-Host " Copying Driver Sources"
     Write-Host "========================================`n"
 
-    $sourceDir = Resolve-ScriptPath $Script:SourceRoot
+    $destinationDir = Join-Path $OutputRoot $Script:DriversDir
 
-    if (-not (Test-Path $sourceDir)) {
-        Write-Host "[ERROR] Source directory not found: $sourceDir" -ForegroundColor Red
+    if (-not (Test-Path $Script:SourceRoot)) {
+        Write-Host "[ERROR] Source directory not found: $Script:SourceRoot" -ForegroundColor Red
         return $false
     }
 
-    New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
 
     # Copy *.inf files
-    $infFiles = Get-ChildItem -Path $sourceDir -File -Filter "*.inf"
+    $infFiles = Get-ChildItem -Path $Script:SourceRoot -File -Filter "*.inf"
     foreach ($inf in $infFiles) {
-        Copy-Item -Path $inf.FullName -Destination $OutputRoot -Force
-        Write-Host "[COPY] $($inf.Name) -> $OutputRoot"
+        Copy-Item -Path $inf.FullName -Destination $destinationDir -Force
+        Write-Host "[COPY] $($inf.Name) -> $destinationDir"
     }
 
     Write-Host ""
-    Write-Host "[OK] $($infFiles.Count) INF file(s) copied to: $OutputRoot" -ForegroundColor Green
+    Write-Host "[OK] $($infFiles.Count) INF file(s) copied to: $destinationDir" -ForegroundColor Green
+    return $true
+}
+
+# Copies pre-compiled binary assets listed in BinaryAssets..
+function Copy-BinaryAssets {
+    Write-Host "========================================"
+    Write-Host " Copying Binary Assets"
+    Write-Host "========================================`n"
+
+    foreach ($asset in $Script:BinaryAssets) {
+        $srcPath        = Join-Path $Script:SourceRoot $asset.Source
+        $destinationDir = Join-Path $OutputRoot        $asset.Destination
+
+        if (-not (Test-Path $srcPath)) {
+            Write-Host "[WARN] Binary asset not found: $srcPath" -ForegroundColor Yellow
+            continue
+        }
+
+        New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
+        Copy-Item -Path $srcPath -Destination $destinationDir -Recurse -Force
+        Write-Host "[COPY] $($asset.Source) -> $($asset.Destination)"
+    }
+
+    Write-Host ""
+    Write-Host "[OK] Binary assets copied." -ForegroundColor Green
     return $true
 }
 
@@ -201,9 +232,10 @@ function Run-StampInf {
         return $false
     }
 
-    $infFiles = Get-ChildItem -Path $OutputRoot -File -Filter "*.inf"
+    $destinationDir = Join-Path $OutputRoot $Script:DriversDir
+    $infFiles = Get-ChildItem -Path $destinationDir -File -Filter "*.inf"
     if (-not $infFiles) {
-        Write-Host "[WARN] No .inf files found in: $OutputRoot" -ForegroundColor Yellow
+        Write-Host "[WARN] No .inf files found in: $destinationDir" -ForegroundColor Yellow
         return $true
     }
 
@@ -240,9 +272,10 @@ function Run-Inf2Cat {
     Write-Host " OS targets: $Inf2CatOSList"
     Write-Host "========================================`n"
 
-    $infFiles = Get-ChildItem -Path $OutputRoot -File -Filter "*.inf"
+    $destinationDir = Join-Path $OutputRoot $Script:DriversDir
+    $infFiles = Get-ChildItem -Path $destinationDir -File -Filter "*.inf"
     if (-not $infFiles) {
-        Write-Host "[WARN] No .inf files found in: $OutputRoot" -ForegroundColor Yellow
+        Write-Host "[WARN] No .inf files found in: $destinationDir" -ForegroundColor Yellow
         return $false
     }
 
@@ -250,7 +283,7 @@ function Run-Inf2Cat {
         Write-Host "[INF2CAT] Found: $($inf.Name)"
     }
 
-    & $WDKTools["inf2cat.exe"] /driver:"$OutputRoot" /os:$Inf2CatOSList /uselocaltime 2>&1 | Out-Host
+    & $WDKTools["inf2cat.exe"] /driver:"$destinationDir" /os:$Inf2CatOSList /uselocaltime 2>&1 | Out-Host
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[ERROR] inf2cat failed with exit code: $LASTEXITCODE" -ForegroundColor Red
         return $false
@@ -273,10 +306,8 @@ function Main {
     if ($OutputTo) {
         $Script:OutputRoot = $OutputTo
     }
-    else {
-        $Script:OutputRoot = Resolve-ScriptPath $OutputRoot
-    }
-    $Script:OutputRoot = Join-Path $OutputRoot $DriversDir
+    $Script:OutputRoot        = Resolve-ScriptPath $Script:OutputRoot
+    $Script:SourceRoot        = Resolve-ScriptPath $Script:SourceRoot
     $Script:VersionHeaderFile = Resolve-ScriptPath $Script:VersionHeaderFile
 
     # --- Step 1: Locate WDK ---
@@ -304,15 +335,23 @@ function Main {
     }
 
     # --- Step 3: Clean output directory ---
-    if (-not $OutputTo -and (Test-Path $OutputRoot)) {
-        Remove-Item -Path $OutputRoot -Recurse -Force
-        Write-Host "[INFO] Cleaned output directory: $OutputRoot"
+    $cleanDir = Join-Path $OutputRoot $DriversDir
+    if (-not $OutputTo -and (Test-Path $cleanDir)) {
+        Remove-Item -Path $cleanDir -Recurse -Force
+        Write-Host "[INFO] Cleaned output directory: $cleanDir"
     }
     Write-Host ""
 
-    # --- Step 4: Copy INFs and filter binaries to output ---
+    # --- Step 4: Copy INFs to output ---
     if (-not (Copy-DriverOutputs)) {
         Write-Host "[ERROR] Copy step failed. Aborting." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host ""
+
+    # --- Step 4b: Copy binary assets (pre-compiled .sys, .dll, etc.) ---
+    if (-not (Copy-BinaryAssets)) {
+        Write-Host "[ERROR] Binary asset copy step failed. Aborting." -ForegroundColor Red
         exit 1
     }
     Write-Host ""
@@ -332,7 +371,7 @@ function Main {
     Write-Host ""
 
     Write-Host "[OK] All build tasks completed successfully." -ForegroundColor Green
-    Write-Host "[INFO] Output Location: $OutputRoot"
+    Write-Host "[INFO] Output Location: $(Join-Path $OutputRoot $DriversDir)"
     Write-Host ""
 }
 
