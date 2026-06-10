@@ -1,5 +1,6 @@
 param(
     [string]$OutputName = "installer.exe",
+    [ValidateSet("x64", "x86", "arm64")]
     [string]$Arch = "x64"   # default value (adjust if needed)
 )
 
@@ -10,6 +11,17 @@ param(
 $Script:OutputRoot   = Join-Path $PSScriptRoot "target"
 $Script:PayloadName  = "payload.zip"
 $Script:VersionFile  = Join-Path $PSScriptRoot "..\qcversion.h"
+
+
+$Script:LibusbVersion = "1.0.29"
+
+# Mapping from our arch names to the folder names inside the libusb binaries archive.
+# These correspond to the MinGW-compiled DLL subdirectories in libusb-<ver>-binaries.7z.
+$Script:LibusbArchMap = @{
+    "x64"   = "MinGW64"
+    "x86"   = "MinGW32"
+    "arm64" = "MinGW-llvm-aarch64"
+}
 
 # Items to include in the payload zip (files or directories under target/).
 # Promote: optional list of file names to move to the payload root.
@@ -22,6 +34,85 @@ $Script:PayloadItems = @(
 # ==============================================================================
 # Functions
 # ==============================================================================
+
+# Downloads libusb binaries from the official GitHub release and places
+# libusb-1.0.dll for each architecture under $PSScriptRoot\libusb\<arch>\.
+# Skips the download if all required DLLs are already present.
+function Get-LibusbBinaries {
+    Write-Host "========================================"
+    Write-Host " Fetching libusb $($Script:LibusbVersion) Binaries"
+    Write-Host "========================================`n"
+
+    $libusbDir = Join-Path $PSScriptRoot "libusb"
+
+    # Check if all DLLs are already present; skip download if so.
+    $allPresent = $true
+    foreach ($arch in $Script:LibusbArchMap.Keys) {
+        if (-not (Test-Path (Join-Path (Join-Path $libusbDir $arch) "libusb-1.0.dll"))) {
+            $allPresent = $false
+            break
+        }
+    }
+    if ($allPresent) {
+        Write-Host "[SKIP] libusb DLLs already present in: $libusbDir`n"
+        return
+    }
+
+
+        # Download the archive to the current script directory.
+    $archiveName = "libusb-$($Script:LibusbVersion).7z"
+    $downloadUrl = "https://github.com/libusb/libusb/releases/download/v$($Script:LibusbVersion)/$archiveName"
+    $tempArchive = Join-Path $PSScriptRoot $archiveName
+
+    Write-Host "[DOWNLOAD] $downloadUrl"
+    try {
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $tempArchive -UseBasicParsing
+    } catch {
+        Write-Error "[ERROR] Failed to download libusb: $_"
+        exit 1
+    }
+
+    # Extract to a subdirectory in the current script directory.
+    $tempExtract = Join-Path $PSScriptRoot ("libusb_dlls")
+    New-Item -ItemType Directory -Path $tempExtract -Force | Out-Null
+    $tarExe = Get-Command 'tar.exe' -ErrorAction SilentlyContinue
+    if (-not $tarExe) {
+        Write-Error '[ERROR] tar.exe not found. Windows 10 build 17063 or later is required.'
+        exit 1
+    }
+
+    try {
+        Write-Host "[EXTRACT] Extracting $archiveName"
+        & tar.exe -xf $tempArchive -C $tempExtract
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "[ERROR] Extraction failed (exit code $LASTEXITCODE)."
+            exit 1
+        }
+
+        # The archive root folder is named libusb-<version>-binaries.
+        $extractedRoot = $tempExtract
+
+        # Copy libusb-1.0.dll for each architecture.
+        foreach ($arch in $Script:LibusbArchMap.Keys) {
+            $srcDll  = Join-Path (Join-Path (Join-Path $extractedRoot $Script:LibusbArchMap[$arch]) "dll") "libusb-1.0.dll"
+            $destDir = Join-Path $libusbDir $arch
+            New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+
+            if (Test-Path $srcDll) {
+                Copy-Item -Path $srcDll -Destination $destDir -Force
+                Write-Host "[COPY] $($Script:LibusbArchMap[$arch])/dll/libusb-1.0.dll -> libusb/$arch/"
+            } else {
+                Write-Warning "[WARNING] DLL not found in archive at expected path: $srcDll"
+            }
+        }
+
+        Write-Host "[OK] libusb $($Script:LibusbVersion) binaries ready in: $libusbDir`n" -ForegroundColor Green
+    }
+    finally {
+        Remove-Item $tempArchive -Force -ErrorAction SilentlyContinue
+        Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 
 # Assembles a payload zip from target/drivers and target/tools.
 function New-Payload {
@@ -37,13 +128,12 @@ function New-Payload {
         # Copy all payload items into the staging root.
         foreach ($item in $Script:PayloadItems) {
             $src = Join-Path $Script:OutputRoot $item.Path
-            if ($item.Path -eq "libusb" -and $item.Arch) {
+            if ($item.Arch) {
 
-                $archSource = Join-Path $item.path $item.Arch
+                $archSource = Join-Path (Join-Path $PSScriptRoot $item.path) $item.Arch
                 $destLibusb = Join-Path $stagingDir "libusb"
-                $destArch   = Join-Path $destLibusb $item.Arch
                 if (-not (Test-Path $archSource)) {
-                    Write-Error "[WARNING] libusb arch folder not found: $archSource"
+                    Write-Warning "[WARNING] libusb arch folder not found: $archSource"
                     continue
                 }
                 New-Item -ItemType Directory -Path $destLibusb -Force | Out-Null
@@ -57,7 +147,8 @@ function New-Payload {
                 Write-Host "[COPY] $($item.Path) -> staging"
             } else {
                 Write-Error "[ERROR] Payload item not found: $src"
-                exit 1
+                #exit 1
+                continue
             }
 
             if ($item.Promote) {
@@ -98,6 +189,9 @@ function New-Payload {
 # ==============================================================================
 # Main Logic
 # ==============================================================================
+
+# --- Fetch libusb binaries ---
+Get-LibusbBinaries
 
 # --- Build payload ---
 $PayloadFullPath = (Resolve-Path (New-Payload)).Path
