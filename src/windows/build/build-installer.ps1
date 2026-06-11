@@ -12,11 +12,13 @@ $Script:OutputRoot   = Join-Path $PSScriptRoot "target"
 $Script:PayloadName  = "payload.zip"
 $Script:VersionFile  = Join-Path $PSScriptRoot "..\qcversion.h"
 
-
+# Libusb related parameters
 $Script:LibusbVersion = "1.0.29"
+$Script:LibusbLibrary = "libusb-1.0.dll"
+$Script:LibusbArchive = "libusb-$($Script:LibusbVersion).7z"
 
 # Mapping from our arch names to the folder names inside the libusb binaries archive.
-# These correspond to the MinGW-compiled DLL subdirectories in libusb-<ver>-binaries.7z.
+# These correspond to the MinGW-compiled DLL subdirectories in libusb-<ver>.7z.
 $Script:LibusbArchMap = @{
     "x64"   = "MinGW64"
     "x86"   = "MinGW32"
@@ -48,7 +50,7 @@ function Get-LibusbBinaries {
     # Check if all DLLs are already present; skip download if so.
     $allPresent = $true
     foreach ($arch in $Script:LibusbArchMap.Keys) {
-        if (-not (Test-Path (Join-Path (Join-Path $libusbDir $arch) "libusb-1.0.dll"))) {
+        if (-not (Test-Path (Join-Path (Join-Path $libusbDir $arch) $Script:LibusbLibrary))) {
             $allPresent = $false
             break
         }
@@ -58,49 +60,44 @@ function Get-LibusbBinaries {
         return
     }
 
-
-        # Download the archive to the current script directory.
-    $archiveName = "libusb-$($Script:LibusbVersion).7z"
-    $downloadUrl = "https://github.com/libusb/libusb/releases/download/v$($Script:LibusbVersion)/$archiveName"
-    $tempArchive = Join-Path $PSScriptRoot $archiveName
+    # Download the archive to the current script directory.
+    $downloadUrl = "https://github.com/libusb/libusb/releases/download/v$($Script:LibusbVersion)/$($Script:LibusbArchive)"
+    $tempArchive = Join-Path $PSScriptRoot $Script:LibusbArchive
 
     Write-Host "[DOWNLOAD] $downloadUrl"
     try {
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $tempArchive -UseBasicParsing
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $tempArchive
     } catch {
         Write-Error "[ERROR] Failed to download libusb: $_"
         exit 1
     }
 
     # Extract to a subdirectory in the current script directory.
-    $tempExtract = Join-Path $PSScriptRoot ("libusb_dlls")
-    New-Item -ItemType Directory -Path $tempExtract -Force | Out-Null
     $tarExe = Get-Command 'tar.exe' -ErrorAction SilentlyContinue
     if (-not $tarExe) {
-        Write-Error '[ERROR] tar.exe not found. Windows 10 build 17063 or later is required.'
+        Write-Error '[ERROR] tar.exe not found. Windows 10 build 17763 or later is required.'
         exit 1
     }
 
+    $extractedRoot = Join-Path $PSScriptRoot ([System.IO.Path]::GetFileNameWithoutExtension($Script:LibusbArchive))
+    New-Item -ItemType Directory -Path $extractedRoot -Force | Out-Null
     try {
-        Write-Host "[EXTRACT] Extracting $archiveName"
-        & tar.exe -xf $tempArchive -C $tempExtract
+        Write-Host "[EXTRACT] Extracting $($Script:LibusbArchive)"
+        & tar.exe -xf $tempArchive -C $extractedRoot
         if ($LASTEXITCODE -ne 0) {
-            Write-Error "[ERROR] Extraction failed (exit code $LASTEXITCODE)."
+            Write-Error "[ERROR] Failed to extract $($Script:LibusbArchive) (exit code $LASTEXITCODE)."
             exit 1
         }
 
-        # The archive root folder is named libusb-<version>-binaries.
-        $extractedRoot = $tempExtract
-
         # Copy libusb-1.0.dll for each architecture.
         foreach ($arch in $Script:LibusbArchMap.Keys) {
-            $srcDll  = Join-Path (Join-Path (Join-Path $extractedRoot $Script:LibusbArchMap[$arch]) "dll") "libusb-1.0.dll"
+            $srcDll  = Join-Path $extractedRoot "$($Script:LibusbArchMap[$arch])\dll\$Script:LibusbLibrary"
             $destDir = Join-Path $libusbDir $arch
             New-Item -ItemType Directory -Path $destDir -Force | Out-Null
 
             if (Test-Path $srcDll) {
                 Copy-Item -Path $srcDll -Destination $destDir -Force
-                Write-Host "[COPY] $($Script:LibusbArchMap[$arch])/dll/libusb-1.0.dll -> libusb/$arch/"
+                Write-Host "[COPY] $($Script:LibusbArchMap[$arch])/dll/$($Script:LibusbLibrary) -> libusb/$arch/"
             } else {
                 Write-Warning "[WARNING] DLL not found in archive at expected path: $srcDll"
             }
@@ -110,7 +107,7 @@ function Get-LibusbBinaries {
     }
     finally {
         Remove-Item $tempArchive -Force -ErrorAction SilentlyContinue
-        Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $extractedRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -127,27 +124,25 @@ function New-Payload {
     try {
         # Copy all payload items into the staging root.
         foreach ($item in $Script:PayloadItems) {
-            $src = Join-Path $Script:OutputRoot $item.Path
             if ($item.Arch) {
-
-                $archSource = Join-Path (Join-Path $PSScriptRoot $item.path) $item.Arch
-                $destLibusb = Join-Path $stagingDir "libusb"
+                $archSource = Join-Path $PSScriptRoot "$($item.Path)\$($item.Arch)"
+                $destDir    = Join-Path $stagingDir $item.Path
                 if (-not (Test-Path $archSource)) {
-                    Write-Warning "[WARNING] libusb arch folder not found: $archSource"
+                    Write-Warning "[WARNING] $($item.Path) arch folder not found: $archSource"
                     continue
                 }
-                New-Item -ItemType Directory -Path $destLibusb -Force | Out-Null
-                Copy-Item -Path $archSource -Destination $destLibusb -Recurse -Force
-                Write-Host "[COPY] libusb/$($item.Arch) -> staging"
+                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                Copy-Item -Path $archSource -Destination $destDir -Recurse -Force
+                Write-Host "[COPY] $($item.Path)/$($item.Arch) -> staging"
                 continue
             }
 
+            $src = Join-Path $Script:OutputRoot $item.Path
             if (Test-Path $src) {
                 Copy-Item -Path $src -Destination $stagingDir -Recurse -Force
                 Write-Host "[COPY] $($item.Path) -> staging"
             } else {
-                Write-Error "[ERROR] Payload item not found: $src"
-                #exit 1
+                Write-Warning "[WARNING] Payload item not found: $src"
                 continue
             }
 
