@@ -1,5 +1,7 @@
 param(
-    [string]$OutputName = "installer.exe"
+    [string]$OutputName = "installer.exe",
+    [ValidateSet("x64", "x86", "arm64")]
+    [string]$Arch = "x64"   # default value (adjust if needed)
 )
 
 # ==============================================================================
@@ -7,17 +9,107 @@ param(
 # ==============================================================================
 
 $Script:OutputRoot   = Join-Path $PSScriptRoot "target"
-$Script:DriversDir   = "drivers"
-$Script:ToolsDir     = "tools"
 $Script:PayloadName  = "payload.zip"
 $Script:VersionFile  = Join-Path $PSScriptRoot "..\qcversion.h"
 
-# Files to promote from tools/ to the payload root (alongside drivers/ and tools/)
-$Script:PromotedTools = @("qdclr.exe", "qdinstall.exe")
+# Libusb related parameters
+$Script:LibusbVersion = "1.0.29"
+$Script:LibusbLibrary = "libusb-1.0.dll"
+$Script:LibusbArchive = "libusb-$($Script:LibusbVersion).7z"
+
+# Mapping from our arch names to the folder names inside the libusb binaries archive.
+# These correspond to the MinGW-compiled DLL subdirectories in libusb-<ver>.7z.
+$Script:LibusbArchMap = @{
+    "x64"   = "MinGW64"
+    "x86"   = "MinGW32"
+    "arm64" = "MinGW-llvm-aarch64"
+}
+
+# Items to include in the payload zip (files or directories under target/).
+# Promote: optional list of file names to move to the payload root.
+$Script:PayloadItems = @(
+    @{ Path = "libusb"; Arch = $Arch; Promote = $null }
+    @{ Path = "drivers"; Promote = $null }
+    @{ Path = "tools";   Promote = @("qdclr.exe", "qdinstall.exe") }
+)
 
 # ==============================================================================
 # Functions
 # ==============================================================================
+
+# Downloads libusb binaries from the official GitHub release and places
+# libusb-1.0.dll for each architecture under $PSScriptRoot\libusb\<arch>\.
+# Skips the download if all required DLLs are already present.
+function Get-LibusbBinaries {
+    Write-Host "========================================"
+    Write-Host " Fetching libusb $($Script:LibusbVersion) Binaries"
+    Write-Host "========================================`n"
+
+    $libusbDir = Join-Path $PSScriptRoot "libusb"
+
+    # Check if all DLLs are already present; skip download if so.
+    $allPresent = $true
+    foreach ($arch in $Script:LibusbArchMap.Keys) {
+        if (-not (Test-Path (Join-Path (Join-Path $libusbDir $arch) $Script:LibusbLibrary))) {
+            $allPresent = $false
+            break
+        }
+    }
+    if ($allPresent) {
+        Write-Host "[SKIP] libusb DLLs already present in: $libusbDir`n"
+        return
+    }
+
+    # Download the archive to the current script directory.
+    $downloadUrl = "https://github.com/libusb/libusb/releases/download/v$($Script:LibusbVersion)/$($Script:LibusbArchive)"
+    $tempArchive = Join-Path $PSScriptRoot $Script:LibusbArchive
+
+    Write-Host "[DOWNLOAD] $downloadUrl"
+    try {
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $tempArchive
+    } catch {
+        Write-Error "[ERROR] Failed to download libusb: $_"
+        exit 1
+    }
+
+    # Extract to a subdirectory in the current script directory.
+    $tarExe = Get-Command 'tar.exe' -ErrorAction SilentlyContinue
+    if (-not $tarExe) {
+        Write-Error '[ERROR] tar.exe not found. Windows 10 build 17763 or later is required.'
+        exit 1
+    }
+
+    $extractedRoot = Join-Path $PSScriptRoot ([System.IO.Path]::GetFileNameWithoutExtension($Script:LibusbArchive))
+    New-Item -ItemType Directory -Path $extractedRoot -Force | Out-Null
+    try {
+        Write-Host "[EXTRACT] Extracting $($Script:LibusbArchive)"
+        & tar.exe -xf $tempArchive -C $extractedRoot
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "[ERROR] Failed to extract $($Script:LibusbArchive) (exit code $LASTEXITCODE)."
+            exit 1
+        }
+
+        # Copy libusb-1.0.dll for each architecture.
+        foreach ($arch in $Script:LibusbArchMap.Keys) {
+            $srcDll  = Join-Path $extractedRoot "$($Script:LibusbArchMap[$arch])\dll\$Script:LibusbLibrary"
+            $destDir = Join-Path $libusbDir $arch
+            New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+
+            if (Test-Path $srcDll) {
+                Copy-Item -Path $srcDll -Destination $destDir -Force
+                Write-Host "[COPY] $($Script:LibusbArchMap[$arch])/dll/$($Script:LibusbLibrary) -> libusb/$arch/"
+            } else {
+                Write-Warning "[WARNING] DLL not found in archive at expected path: $srcDll"
+            }
+        }
+
+        Write-Host "[OK] libusb $($Script:LibusbVersion) binaries ready in: $libusbDir`n" -ForegroundColor Green
+    }
+    finally {
+        Remove-Item $tempArchive -Force -ErrorAction SilentlyContinue
+        Remove-Item $extractedRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 
 # Assembles a payload zip from target/drivers and target/tools.
 function New-Payload {
@@ -25,38 +117,46 @@ function New-Payload {
     Write-Host " Packaging Payload"
     Write-Host "========================================`n"
 
-    $driversSource = Join-Path $Script:OutputRoot $Script:DriversDir
-    $toolsSource   = Join-Path $Script:OutputRoot $Script:ToolsDir
-
-    if (-not (Test-Path $driversSource)) {
-        Write-Error "[ERROR] Drivers directory not found: $driversSource"
-        exit 1
-    }
-    if (-not (Test-Path $toolsSource)) {
-        Write-Error "[ERROR] Tools directory not found: $toolsSource"
-        exit 1
-    }
-
     # Create a temp staging directory
     $stagingDir = Join-Path ([System.IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
 
     try {
-        # Copy drivers/ and tools/ into the staging root
-        Copy-Item -Path $driversSource -Destination $stagingDir -Recurse -Force
-        Copy-Item -Path $toolsSource   -Destination $stagingDir -Recurse -Force
-        Write-Host "[COPY] $Script:DriversDir, $Script:ToolsDir -> $stagingDir"
+        # Copy all payload items into the staging root.
+        foreach ($item in $Script:PayloadItems) {
+            if ($item.Arch) {
+                $archSource = Join-Path $PSScriptRoot "$($item.Path)\$($item.Arch)"
+                $destDir    = Join-Path $stagingDir $item.Path
+                if (-not (Test-Path $archSource)) {
+                    Write-Warning "[WARNING] $($item.Path) arch folder not found: $archSource"
+                    continue
+                }
+                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                Copy-Item -Path $archSource -Destination $destDir -Recurse -Force
+                Write-Host "[COPY] $($item.Path)/$($item.Arch) -> staging"
+                continue
+            }
 
-        # Promote specified tools to staging root and remove from tools/
-        $destTools = Join-Path $stagingDir $Script:ToolsDir
-        foreach ($toolFile in $Script:PromotedTools) {
-            $srcFile = Join-Path $destTools $toolFile
-            if (Test-Path $srcFile) {
-                Copy-Item -Path $srcFile -Destination $stagingDir -Force
-                Remove-Item -Path $srcFile -Force
-                Write-Host "[PROMOTE] $toolFile -> payload root"
+            $src = Join-Path $Script:OutputRoot $item.Path
+            if (Test-Path $src) {
+                Copy-Item -Path $src -Destination $stagingDir -Recurse -Force
+                Write-Host "[COPY] $($item.Path) -> staging"
             } else {
-                Write-Warning "[WARNING] Promoted tool not found in Tools: $toolFile"
+                Write-Warning "[WARNING] Payload item not found: $src"
+                continue
+            }
+
+            if ($item.Promote) {
+                foreach ($fileName in $item.Promote) {
+                    $srcFile = Join-Path (Join-Path $stagingDir $item.Path) $fileName
+                    if (Test-Path $srcFile) {
+                        Copy-Item -Path $srcFile -Destination $stagingDir -Force
+                        Remove-Item -Path $srcFile -Force
+                        Write-Host "[PROMOTE] $($item.Path)/$fileName -> payload root"
+                    } else {
+                        Write-Warning "[WARNING] Promoted file not found: $($item.Path)/$fileName"
+                    }
+                }
             }
         }
 
@@ -84,6 +184,9 @@ function New-Payload {
 # ==============================================================================
 # Main Logic
 # ==============================================================================
+
+# --- Fetch libusb binaries ---
+Get-LibusbBinaries
 
 # --- Build payload ---
 $PayloadFullPath = (Resolve-Path (New-Payload)).Path
