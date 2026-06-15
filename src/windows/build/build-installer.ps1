@@ -192,7 +192,9 @@ Get-LibusbBinaries
 $PayloadFullPath = (Resolve-Path (New-Payload)).Path
 
 # --- Parse version ---
-$Version = "1.0.0.0"
+$Version     = "1.0.0.0"
+$ProductName = "Qualcomm USB Userspace Drivers"
+$Copyright   = "Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries."
 if (Test-Path $Script:VersionFile) {
     $versionContent = Get-Content $Script:VersionFile -Raw
     if ($versionContent -match '#define\s+QCOM_USB_DRIVERS_PRODUCT_VERSION\s+([\d.]+)') {
@@ -200,6 +202,12 @@ if (Test-Path $Script:VersionFile) {
         Write-Host "[INFO] Version from header: $Version"
     } else {
         Write-Warning "QCOM_USB_DRIVERS_PRODUCT_VERSION not found in $($Script:VersionFile), using default: $Version"
+    }
+    if ($versionContent -match '#define\s+QCOM_USB_DRIVERS_PRODUCT_NAME\s+"([^"]+)"') {
+        $ProductName = $Matches[1]
+    }
+    if ($versionContent -match '#define\s+QCOM_USB_DRIVERS_COPYRIGHT\s+"([^"]+)"') {
+        $Copyright = $Matches[1]
     }
 } else {
     Write-Warning "[WARNING] Version file not found: $($Script:VersionFile), using default: $Version"
@@ -240,7 +248,7 @@ namespace PayloadInstaller
             "qud.internal"
         };
 
-        static int RunCommand(string fileName, string arguments)
+        static int RunCommand(string fileName, string arguments, bool consoleOutput = true)
         {
             try
             {
@@ -249,6 +257,11 @@ namespace PayloadInstaller
                 if (arguments != null)
                     psi.Arguments = arguments;
                 psi.UseShellExecute = false;
+                if (!consoleOutput)
+                {
+                    psi.RedirectStandardOutput = true;
+                    psi.RedirectStandardError  = true;
+                }
                 Process proc = Process.Start(psi);
                 proc.WaitForExit();
                 return proc.ExitCode;
@@ -260,17 +273,20 @@ namespace PayloadInstaller
             }
         }
 
-        // Uninstall any previous installation.
-        static int Uninstall()
+        // Removal of legacy drivers installed by QPM/QSC
+        static void UninstallLegacy()
         {
-            // Best-effort cleanup of legacy packages
             foreach (string pkg in LegacyPackages)
             {
                 Console.WriteLine("\nUninstalling legacy product: " + pkg + "...");
-                RunCommand("qpm-cli", "--uninstall " + pkg + " --silent");
-                RunCommand("qsc-cli", "tool uninstall -n " + pkg);
+                RunCommand("qpm-cli", "--uninstall " + pkg + " --silent", false);
+                RunCommand("qsc-cli", "tool uninstall -n " + pkg, false);
             }
+        }
 
+        // Uninstall any previous installation.
+        static int Uninstall()
+        {
             int result = 0;
             if (File.Exists(QdinstallExe))
             {
@@ -301,6 +317,7 @@ namespace PayloadInstaller
         // Install drivers and remove previous installation
         static int Install()
         {
+            UninstallLegacy();
             Uninstall();
 
             try
@@ -347,6 +364,15 @@ namespace PayloadInstaller
 
         static int Main(string[] args)
         {
+            // Print banner
+            Console.WriteLine("================================================");
+            Console.WriteLine(" __PRODUCT_NAME__");
+            Console.WriteLine(" Version#: __VERSION__");
+            Console.WriteLine(" Built on: __BUILD_TIME__");
+            Console.WriteLine(" __COPYRIGHT__");
+            Console.WriteLine("================================================");
+            Console.WriteLine();
+
             // Parse arguments
             string mode = "install"; // default (no args)
             if (args.Length > 0)
@@ -396,7 +422,11 @@ $outputExe = Join-Path $Script:OutputRoot $OutputName
 
 # Write C# source to a temp file in the system temp directory
 $sourceFile = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), '.cs')
-$csharpSource = $csharpSource.Replace("__VERSION__", $Version)
+$buildTime    = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm UTC")
+$csharpSource = $csharpSource.Replace("__VERSION__",      $Version)
+$csharpSource = $csharpSource.Replace("__PRODUCT_NAME__", $ProductName)
+$csharpSource = $csharpSource.Replace("__COPYRIGHT__",    $Copyright)
+$csharpSource = $csharpSource.Replace("__BUILD_TIME__",   $buildTime)
 $csharpSource = $csharpSource.Replace("__PAYLOAD_NAME__", $Script:PayloadName)
 Set-Content -Path $sourceFile -Value $csharpSource -Encoding UTF8
 
