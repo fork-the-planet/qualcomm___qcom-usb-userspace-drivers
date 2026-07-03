@@ -12,7 +12,7 @@ param(
 # ==============================================================================
 
 $Script:OutputRoot   = Join-Path $PSScriptRoot "target"
-$Script:PayloadName  = "payload.zip"
+$Script:PayloadName  = "payload_$Arch.zip"
 $Script:VersionFile  = Join-Path $PSScriptRoot "..\qcversion.h"
 
 # Libusb related parameters
