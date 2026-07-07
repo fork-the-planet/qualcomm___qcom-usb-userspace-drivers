@@ -198,7 +198,7 @@ $PayloadFullPath = (Resolve-Path (New-Payload)).Path
 $Version     = "1.0.0.0"
 $ProductName = "Qualcomm USB Userspace Drivers"
 $CompanyName = "Qualcomm Technologies, Inc."
-$Copyright   = "Copyright (c) Qualcomm Technologies, Inc. and/or its
+$Copyright   = "Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries."
 if (Test-Path $Script:VersionFile) {
     $versionContent = Get-Content $Script:VersionFile -Raw
     if ($versionContent -match '#define\s+QCOM_USB_DRIVERS_PRODUCT_VERSION\s+([\d.]+)') {
