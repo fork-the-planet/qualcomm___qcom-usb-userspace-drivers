@@ -247,11 +247,15 @@ namespace PayloadInstaller
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
             "Qualcomm", "Qualcomm USB Drivers");
 
-                static readonly string QdinstallExe = Path.Combine(InstallPath, "qdinstall.exe");
-        static readonly string LogFile      = Path.Combine(
+        static readonly string QdinstallExe = Path.Combine(InstallPath, "qdinstall.exe");
+        static readonly string LogDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "Qualcomm", "QUD",
-            "install_logs_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".txt");
+            "Qualcomm", "QUD");
+        static string LogFile      = null;
+        static string BuildLogFilePath(string mode) {
+            string prefix = (mode == "uninstall") ? "userspace_drivers_uninstall_log" : "userspace_drivers_install_log";
+            return Path.Combine(LogDir, prefix + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".txt");
+        }
 
         // Timeout in milliseconds to wait for qpm-cli / qsc-cli before giving up.
         const int LEGACY_TOOL_TIMEOUT_MS = 30000;
@@ -263,21 +267,22 @@ namespace PayloadInstaller
             "qud.internal"
         };
 
-                // ------------------------------------------------------------------ //
+        // ------------------------------------------------------------------ //
         // Logging helpers                                                      //
         // ------------------------------------------------------------------ //
 
         static StreamWriter _log = null;
 
-        static void OpenLog()
+        static void OpenLog(string mode)
         {
             try
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(LogFile));
+                LogFile = BuildLogFilePath(mode);
+                Directory.CreateDirectory(LogDir);
                 _log = new StreamWriter(LogFile, true, Encoding.UTF8);
                 _log.AutoFlush = true;
                 LogLine("==================================================================");
-                LogLine("[LOG] Qualcomm USB Userspace Driver Installer  v__VERSION__");
+                LogLine("[LOG] __PRODUCT_NAME__  v__VERSION__");
                 LogLine("[LOG] Session started : " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
                 LogLine("[LOG] Log file        : " + LogFile);
                 LogLine("==================================================================");
@@ -457,10 +462,8 @@ namespace PayloadInstaller
 
         static int Uninstall()
         {
-            // Step 1: remove legacy packages installed via qpm-cli / qsc-cli.
-            RemoveLegacyPackages();
 
-            // Step 2: uninstall the current driver and wipe the install directory.
+            // Step 1: uninstall the current driver and wipe the install directory.
             int result = RemoveCurrentInstallation();
 
             if (result == 0)
@@ -479,7 +482,7 @@ namespace PayloadInstaller
         {
             // Create InstallPath first so the log file can be opened inside it.
             Directory.CreateDirectory(InstallPath);
-            OpenLog();
+            OpenLog("install");
 
             LogLine("[STEP] Starting installation");
             LogLine("[INFO] Install path: " + InstallPath);
@@ -583,13 +586,11 @@ namespace PayloadInstaller
                 return 0;
             }
 
-                        int exitCode;
+            int exitCode;
             if (mode == "uninstall")
             {
-                // For a standalone uninstall the install directory already exists,
-                // so we can open the log there before doing anything.
-                if (Directory.Exists(InstallPath))
-                    OpenLog();
+                Directory.CreateDirectory(LogDir);
+                OpenLog("uninstall");
                 LogLine("[STEP] Mode: uninstall");
                 exitCode = Uninstall();
             }
